@@ -1,0 +1,43 @@
+name: Ultimate-Termux-Mirror
+on:
+  schedule: [{cron: '0 * * * *'}]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 20}
+
+      - name: Generate Mission List
+        run: |
+          npm install axios
+          node todo.js
+
+      - name: Build New Package
+        run: |
+          # 未ビルドのターゲットを1つ選出
+          TARGET=$(node -p "JSON.parse(require('fs').readFileSync('todo.json'))[0]")
+          echo "Building: $TARGET"
+          
+          # Termux公式のビルドコンテナでコンパイルを試みる
+          docker run --rm \
+            -v $GITHUB_WORKSPACE:/home/builder/termux-packages \
+            termux/package-builder \
+            bash -c "apt update && ./build-package.sh $TARGET" || echo "Build failed"
+
+      - name: Update Repository Index
+        run: |
+          mkdir -p apt/termux-main
+          mv *.deb apt/termux-main/ || true
+          cd apt/termux-main
+          # aptリポジトリ用のインデックス作成
+          dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./apt/ubuntu/termux/main
