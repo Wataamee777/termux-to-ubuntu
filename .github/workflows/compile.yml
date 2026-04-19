@@ -59,11 +59,11 @@ jobs:
           else
             echo "$TARGET" >> success.txt
             # ビルドされた.debを公開ディレクトリに移動
-            mkdir -p docs/apt/termux-main
-            mv *.deb docs/apt/termux-main/ 2>/dev/null || true
+            mkdir -p apt/ubuntu/termux-main
+            mv *.deb apt/ubuntu/termux-main/ 2>/dev/null || true
             
             # インデックスの更新（GitHub Pages用）
-            cd docs/apt/termux-main
+            cd apt/ubuntu/termux-main
             dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz
           fi
 
@@ -71,6 +71,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@://github.com"
-          git add docs/ success.txt fail.txt
+          git add apt/ success.txt fail.txt
           git commit -m "Build: ${{ steps.select.outputs.target }}" || exit 0
           git push
