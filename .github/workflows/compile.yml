@@ -1,7 +1,7 @@
 name: Termux Treasure Builder (Full Source Mode)
 on:
   schedule:
-    - cron: '0 * * * *' # 1時間に1回実行
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -17,104 +17,90 @@ jobs:
 
       - name: Setup Environment
         run: |
-          # 履歴ファイルの初期化
           touch success.txt fail.txt
-          # Termux SDKのクローン
           git clone --depth 1 https://github.com/termux/termux-packages builder-core
           mkdir -p apt/termux-main output
 
-      - name: Update Target List (Scan Treasures)
+      - name: Update Target List
         run: |
-          # 最新のリポジトリ情報をスキャンしてtodo.jsonを更新
-          npm i axios
+          npm i axois
           node todo.js
 
-      - name: Select Next Target
+      - name: Select Next 10 Targets
         id: select
         run: |
-          TARGET=$(node -e "
+          TARGETS=$(node -e "
             const fs = require('fs');
+            const read = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
             const data = JSON.parse(fs.readFileSync('todo.json', 'utf8'));
             const done = new Set([
-              ...fs.readFileSync('success.txt', 'utf8').split('\n'),
-              ...fs.readFileSync('fail.txt', 'utf8').split('\n')
+              ...read('success.txt').split('\n'),
+              ...read('fail.txt').split('\n')
             ].map(s => s.trim()).filter(s => s));
             
-            // 完了していない最初のターゲットを選択
-            const next = data.targets.find(t => !done.has(t));
-            if (next) {
-              console.log(next);
-            } else {
-              process.exit(1); // ターゲットが尽きたら終了
-            }
+            const next = data.targets.filter(t => !done.has(t)).slice(0, 10);
+            if (next.length > 0) console.log(next.join(' '));
+            else process.exit(1);
           ")
-          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "list=$TARGETS" >> $GITHUB_OUTPUT
 
-      - name: Build in Termux Docker
+      - name: Build Loop
         run: |
-          TARGET="${{ steps.select.outputs.target }}"
-          touch BUILD_FAILED # デフォルトは失敗扱い
-          
-          docker run --rm \
-            -v $(pwd)/builder-core:/home/builder/termux-packages \
-            -v $(pwd)/output:/home/builder/output \
-            -e TARGET_PKG=$TARGET \
-            ghcr.io/termux/package-builder:latest \
-            bash -c "
-              set -ex
-              # ソースリストにUbuntuの全アーキテクチャ対応のdeb-srcを追加
-              echo 'deb-src http://archive.ubuntu.com/ubuntu noble main universe' | sudo tee -a /etc/apt/sources.list
-              echo 'deb-src http://ports.ubuntu.com/ubuntu-ports noble main universe' | sudo tee -a /etc/apt/sources.list
-              sudo apt-get update
-              
-              # ソースの取得
-              mkdir -p /tmp/work && cd /tmp/work
-              apt-get source \$TARGET_PKG || exit 1
-              SOURCE_DIR=\$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
-              
-              # Termuxビルドレシピの動的生成
-              PKG_DIR=/home/builder/termux-packages/packages/\$TARGET_PKG
-              mkdir -p \$PKG_DIR
-              cat <<EOF > \$PKG_DIR/build.sh
+          for TARGET in ${{ steps.select.outputs.list }}; do
+            echo "::group::Building $TARGET"
+            rm -rf output/*
+            touch BUILD_FAILED
+            
+            docker run --rm \
+              -v $(pwd)/builder-core:/home/builder/termux-packages \
+              -v $(pwd)/output:/home/builder/output \
+              -e TGT=$TARGET \
+              ghcr.io/termux/package-builder:latest \
+              bash -c "
+                set -ex
+                # ソースリポジトリの追加（x86/Arm両方）
+                echo 'deb-src http://archive.ubuntu.com/ubuntu noble main universe' | sudo tee -a /etc/apt/sources.list
+                echo 'deb-src http://ports.ubuntu.com/ubuntu-ports noble main universe' | sudo tee -a /etc/apt/sources.list
+                sudo apt-get update
+                
+                mkdir -p /tmp/work && cd /tmp/work
+                apt-get source \$TGT || exit 1
+                SRC_DIR=\$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
+                
+                PKG_DIR=/home/builder/termux-packages/packages/\$TGT
+                mkdir -p \$PKG_DIR
+                cat <<EOF > \$PKG_DIR/build.sh
           TERMUX_PKG_HOMEPAGE=https://ubuntu.com
-          TERMUX_PKG_DESCRIPTION=\"Auto-built treasure from Ubuntu source\"
+          TERMUX_PKG_DESCRIPTION=\"Auto-built treasure\"
           TERMUX_PKG_VERSION=99.99
           TERMUX_PKG_SKIP_SRC_EXTRACT=true
           termux_step_extract_package() {
             mkdir -p \\\$TERMUX_PKG_SRCDIR
-            cp -a /tmp/work/\${SOURCE_DIR#./}/* \\\$TERMUX_PKG_SRCDIR/
+            cp -a /tmp/work/\${SRC_DIR#./}/* \\\$TERMUX_PKG_SRCDIR/
           }
           EOF
+                cd /home/builder/termux-packages
+                ./build-package.sh -a aarch64 \$TGT && rm -f /home/builder/output/../BUILD_FAILED || true
+                cp ./output/*.deb /home/builder/output/ 2>/dev/null || true
+              "
 
-              # クロスビルド実行 (aarch64)
-              cd /home/builder/termux-packages
-              ./build-package.sh -a aarch64 \$TARGET_PKG
-              
-              # 成果物があれば成功
-              if [ -f ./output/*.deb ]; then
-                cp ./output/*.deb /home/builder/output/
-                rm /home/builder/output/../BUILD_FAILED
-              fi
-            " || echo "Build process exited with error."
+            if [ -f BUILD_FAILED ]; then
+              echo "$TARGET" >> fail.txt
+            else
+              echo "$TARGET" >> success.txt
+              cp output/*.deb apt/termux-main/ 2>/dev/null || echo "$TARGET" >> fail.txt
+            fi
+            echo "::endgroup::"
+          done
 
-      - name: Finalize and Update APT Repository
+      - name: Update APT Repo Index
         run: |
-          TARGET="${{ steps.select.outputs.target }}"
-          if [ -f BUILD_FAILED ]; then
-            echo "$TARGET" >> fail.txt
-          else
-            echo "$TARGET" >> success.txt
-            mkdir -p apt/termux-main
-            cp output/*.deb apt/termux-main/
-            
-            # リポジトリインデックスの更新
-            cd apt/termux-main
-            dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz
-          fi
+          cd apt/termux-main
+          dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz
 
-      - name: Push Changes
+      - name: Commit and Push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add success.txt fail.txt todo.json apt/
-          git diff --staged --quiet || (git commit -m "Build treasure: ${{ steps.select.outputs.target }}" && git push origin main)
+          git diff --staged --quiet || (git commit -m "Build 10 treasures: ${{ steps.select.outputs.list }}" && git push origin main)
