@@ -30,9 +30,8 @@ jobs:
 
       - name: Update Repository Index
         run: |
-          mkdir -p apt/termux-main
-          mv *.deb apt/termux-main/ || true
-          cd apt/termux-main
+          mv *.deb apt/ubuntu/termux-main/ || true
+          cd apt/ubuntu/termux-main
           # aptリポジトリ用のインデックス作成
           dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz
 
@@ -40,4 +39,4 @@ jobs:
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./apt/ubuntu/termux/main
+          publish_dir: ./apt/ubuntu/termux-main
