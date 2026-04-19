@@ -2,80 +2,62 @@ const axios = require('axios');
 const zlib = require('zlib');
 const fs = require('fs');
 
-/**
- * リポジトリのリストを取得してパースする
- * @param {string} url 
- * @param {string} type 'ubuntu' | 'termux'
- */
-async function getList(url, type) {
-    console.log(`Downloading ${type} list from: ${url}`);
+async function getPackages(url) {
+    console.log(`取得中: ${url}`);
     try {
-        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000 });
+        const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 60000 });
         const content = zlib.gunzipSync(res.data).toString('utf-8');
+        const pkgs = new Set();
         
-        const x86_64 = new Set();
-        const arm64 = new Set();
-
-        const lines = content.split('\n');
-        for (let line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed === 'FILE LOCATION') continue;
-
-            if (type === 'ubuntu') {
-                if (trimmed.endsWith('.deb')) {
-                    const file = trimmed.split(/\s+/).pop();
-                    const pkgName = file.split('_')[0];
-                    if (file.includes('_amd64.deb')) x86_64.add(pkgName);
-                    if (file.includes('_arm64.deb') || file.includes('_aarch64.deb')) arm64.add(pkgName);
-                }
-            } else if (type === 'termux') {
-                // Contents-aarch64.gz の形式（末尾がパッケージ名）
-                const parts = trimmed.split(/\s+/);
-                const pkg = parts.pop();
-                const pkgName = pkg.includes('/') ? pkg.split('/').pop() : pkg;
-                arm64.add(pkgName);
+        content.split('\n').forEach(line => {
+            if (line.startsWith('Package: ')) {
+                pkgs.add(line.replace('Package: ', '').trim());
             }
-        }
-        return { x86_64, arm64 };
+        });
+        return pkgs;
     } catch (e) {
-        console.error(`Error fetching ${type}: ${e.message}`);
-        return { x86_64: new Set(), arm64: new Set() };
+        console.error(`取得失敗: ${url} (${e.message})`);
+        return new Set();
     }
 }
 
 async function main() {
-    // 1. Ubuntu (noble/main) の全ファイルリスト
-    const uUrl = 'https://archive.ubuntu.com/ubuntu/ls-lR.gz';
-    // 2. Termux 公式の全ファイルリスト
-    const tUrl = 'https://packages-cf.termux.dev/apt/termux-main/dists/stable/Contents-aarch64.gz';
+    // --- エンドポイント設定 ---
+    const BASE_U = 'http://archive.ubuntu.com/ubuntu/dists/noble/main';
+    const BASE_P = 'http://ports.ubuntu.com/ubuntu-ports/dists/noble/main';
+    const BASE_T = 'https://packages-cf.termux.dev/apt/termux-main/dists/stable/main';
 
-    const [ubuntu, termux] = await Promise.all([
-        getList(uUrl, 'ubuntu'),
-        getList(tUrl, 'termux')
+    const [uX86, uArm, tArm] = await Promise.all([
+        getPackages(`${BASE_U}/binary-amd64/Packages.gz`),   // Ubuntu x86_64
+        getPackages(`${BASE_P}/binary-arm64/Packages.gz`),   // Ubuntu Arm64
+        getPackages(`${BASE_T}/binary-aarch64/Packages.gz`)  // Termux Arm64
     ]);
 
-    // 【ロジック】
-    // Ubuntuのx86_64には存在するが、
-    // 「Ubuntuのarm64」にも「Termuxのarm64」にも存在しないもの
-    const todo = [...ubuntu.x86_64].filter(pkg => 
-        !ubuntu.arm64.has(pkg) && 
-        !termux.arm64.has(pkg)
-    ).sort();
+    // 【お宝ロジック】
+    // 1. Ubuntu(Arm64)にはあるが、Termuxにはない（成功率：高）
+    const easyTargets = [...uArm].filter(pkg => !tArm.has(pkg));
 
-    // 結果の保存
+    // 2. Ubuntu(x86_64)にしかない（成功率：低だが、真のお宝）
+    const rareTargets = [...uX86].filter(pkg => !uArm.has(pkg) && !tArm.has(pkg));
+
+    // 統合してソート
+    const allTodo = [...new Set([...easyTargets, ...rareTargets])].sort();
+
     const result = {
-        total_x86_64: ubuntu.x86_64.size,
-        total_arm64_exists: ubuntu.arm64.size + termux.arm64.size,
-        target_count: todo.length,
-        targets: todo
+        stats: {
+            ubuntu_x86_only: rareTargets.length,
+            ubuntu_arm_but_not_termux: easyTargets.length,
+            total_targets: allTodo.length
+        },
+        targets: allTodo
     };
 
     fs.writeFileSync('todo.json', JSON.stringify(result, null, 2));
     
-    console.log(`\n--- 統計 ---`);
-    console.log(`Ubuntu x86_64 総数: ${ubuntu.x86_64.size}`);
-    console.log(`不足（お宝候補）: ${todo.length}`);
-    console.log(`最初の5個: ${todo.slice(0, 5).join(', ')}`);
+    console.log(`\n--- 発掘結果 ---`);
+    console.log(`成功率高（Arm版あり）: ${easyTargets.length}件`);
+    console.log(`未知の領域（x86版のみ）: ${rareTargets.length}件`);
+    console.log(`合計 ${allTodo.length} 件を todo.json に保存しました。`);
 }
 
 main();
