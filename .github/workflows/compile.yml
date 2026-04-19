@@ -1,44 +1,76 @@
-name: Ultimate-Termux-Mirror
+name: Termux Treasure Builder
 on:
-  schedule: [{cron: '0 * * * *'}]
-  workflow_dispatch:
-  
-permissions: write-all
+  schedule:
+    - cron: '0 * * * *' # 1時間ごとに実行
+  workflow_dispatch:      # 手動実行用
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: {node-version: 20}
 
-      - name: Generate Mission List
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate Todo List
         run: |
           npm install axios
           node todo.js
 
-      - name: Build New Package
+      - name: Select Next Target
+        id: select
         run: |
-          # 未ビルドのターゲットを1つ選出
-          TARGET=$(node -p "JSON.parse(require('fs').readFileSync('todo.json'))[0]")
-          echo "Building: $TARGET"
-          
-          # Termux公式のビルドコンテナでコンパイルを試みる
+          # 成功・失敗リストを読み込んで、まだ試していないターゲットを1つ選ぶ
+          TARGET=$(node -e "
+            const todo = JSON.parse(require('fs').readFileSync('todo.json')).targets;
+            const done = new Set([
+              ...require('fs').readFileSync('success.txt', 'utf8').split('\n'),
+              ...require('fs').readFileSync('fail.txt', 'utf8').split('\n')
+            ]);
+            const next = todo.find(p => p && !done.has(p));
+            if (next) console.log(next);
+            else process.exit(1);
+          ")
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "Building target: $TARGET"
+
+      - name: Build with Termux Docker
+        if: steps.select.outputs.target != ''
+        run: |
+          # Termux公式のビルド環境Dockerを使用
+          # コンテナ内でビルドを実行し、成果物（.deb）を取り出す
           docker run --rm \
             -v $GITHUB_WORKSPACE:/home/builder/termux-packages \
             termux/package-builder \
-            bash -c "sudo apt update && ./build-package.sh $TARGET" || echo "Build failed"
+            bash -c "
+              ./build-package.sh ${{ steps.select.outputs.target }}
+            " || touch BUILD_FAILED
 
-      - name: Update Repository Index
+      - name: Update Repository and Logs
         run: |
-          mv *.deb apt/ubuntu/termux-main/ || true
-          cd apt/ubuntu/termux-main
-          # aptリポジトリ用のインデックス作成
-          dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz
+          TARGET="${{ steps.select.outputs.target }}"
+          if [ -f BUILD_FAILED ]; then
+            echo "$TARGET" >> fail.txt
+          else
+            echo "$TARGET" >> success.txt
+            # ビルドされた.debを公開ディレクトリに移動
+            mkdir -p docs/apt/termux-main
+            mv *.deb docs/apt/termux-main/ 2>/dev/null || true
+            
+            # インデックスの更新（GitHub Pages用）
+            cd docs/apt/termux-main
+            dpkg-scanpackages . /dev/null | gzip -9c > Packages.gz
+          fi
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./apt/ubuntu/termux-main
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@://github.com"
+          git add docs/ success.txt fail.txt
+          git commit -m "Build: ${{ steps.select.outputs.target }}" || exit 0
+          git push
